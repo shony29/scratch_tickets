@@ -560,7 +560,7 @@ const ONLINE = !!(CFG.supabaseUrl && CFG.supabaseAnonKey && /^https:\/\//.test(C
 const sb = ONLINE ? window.supabase.createClient(CFG.supabaseUrl.trim().replace(/\/+$/, ''), CFG.supabaseAnonKey.trim()) : null;
 let me = null, uid = null;
 const ERR = {
-  not_enough_chips: 'Not enough chips', chest_used: 'Chest already opened today', no_such_player: 'No player with that name',
+  not_enough_chips: 'Not enough chips', chest_used: 'You’ve already had today’s daily draw', no_such_player: 'No player with that name',
   thats_you: 'That’s you', already_friends: 'You’re already friends', not_friends: 'You can only do that with friends',
   bad_amount: 'Pick an amount from 1 to 1,000', no_such_room: 'Room not found', room_started: 'That game already started',
   room_full: 'That room is full', in_a_game: 'Finish your current room game first', not_host: 'Only the host can do that',
@@ -602,7 +602,7 @@ function applyDaily(silent) {
   state.day = today;
   state.today = { day: today, spent: 0, won: 0 };
   if (state.balance < 50) { state.balance = 50; if (!silent) toast('New day · 50 chips'); }
-  else if (!silent) toast('New day · chest ready');
+  else if (!silent) toast('New day · daily draw ready');
   save();
 }
 
@@ -953,30 +953,6 @@ const Ambient = (() => {
   };
 })();
 
-const CHEST_SVG = `<svg class="chest-svg" viewBox="0 0 200 170" aria-hidden="true">
-  <defs>
-    <linearGradient id="wood" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8A5429"/><stop offset="1" stop-color="#4A2A12"/></linearGradient>
-    <linearGradient id="lidw" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#A2673A"/><stop offset="1" stop-color="#6B3F1F"/></linearGradient>
-    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#FFE7A6"/><stop offset=".5" stop-color="#F2C14E"/><stop offset="1" stop-color="#A87A2A"/></linearGradient>
-    <radialGradient id="light" cx=".5" cy="1" r=".8"><stop offset="0" stop-color="#FFF3C4" stop-opacity="1"/><stop offset="1" stop-color="#FFD166" stop-opacity="0"/></radialGradient>
-  </defs>
-  <ellipse cx="100" cy="156" rx="78" ry="9" fill="#000" opacity=".4"/>
-  <ellipse class="chest-light" cx="100" cy="80" rx="80" ry="60" fill="url(#light)"/>
-  <g>
-    <rect x="25" y="80" width="150" height="72" rx="10" fill="url(#wood)"/>
-    <rect x="25" y="80" width="150" height="10" fill="url(#gold)"/>
-    <rect x="45" y="80" width="12" height="72" fill="url(#gold)"/><rect x="143" y="80" width="12" height="72" fill="url(#gold)"/>
-    <rect x="25" y="144" width="150" height="8" rx="3" fill="url(#gold)"/>
-    <rect x="86" y="86" width="28" height="34" rx="5" fill="url(#gold)"/>
-    <circle cx="100" cy="99" r="4" fill="#3A220E"/><rect x="98" y="100" width="4" height="10" rx="1.5" fill="#3A220E"/>
-  </g>
-  <g class="chest-lid">
-    <path d="M25 84 V62 Q25 26 100 26 Q175 26 175 62 V84 Z" fill="url(#lidw)"/>
-    <path d="M45 84 V40 Q48 31 57 29 V84 Z" fill="url(#gold)"/><path d="M143 29 Q152 31 155 40 V84 H143 Z" fill="url(#gold)"/>
-    <rect x="23" y="78" width="154" height="9" rx="3" fill="url(#gold)"/>
-    <path d="M40 50 Q100 30 160 50" stroke="#fff" stroke-opacity=".18" stroke-width="3" fill="none"/>
-  </g>
-</svg>`;
 
 THEMES.forEach((t, i) => { t.idx = i; });
 const TIER_OF = p => TIERS.find(x => x.price === p);
@@ -1140,7 +1116,7 @@ function renderResume() {
 function updateChestBtn() {
   const ready = state.chestDay !== dayKey();
   $('#chestBtn').classList.toggle('ready', ready);
-  $('#chestLbl').textContent = ready ? 'OPEN CHEST' : hms(msToMidnight());
+  $('#chestLbl').textContent = ready ? 'DAILY DRAW' : hms(msToMidnight());
 }
 function refreshLobby() { renderInfo(false); renderResume(); updateChestBtn(); }
 function renderAll() {
@@ -1157,7 +1133,7 @@ function buy(t, fromEl) {
     openPlay(state.current, fromEl); return;
   }
   if (state.balance < t.price) {
-    toast(state.chestDay !== dayKey() ? 'Not enough chips. Open your chest.' : 'Not enough chips');
+    toast(state.chestDay !== dayKey() ? 'Not enough chips. Try your daily draw.' : 'Not enough chips');
     $('#buyBtn').animate([{ transform: 'translateX(0)' }, { transform: 'translateX(-8px)' }, { transform: 'translateX(8px)' }, { transform: 'translateX(-4px)' }, { transform: 'translateX(0)' }], { duration: 360 });
     return;
   }
@@ -1493,30 +1469,22 @@ function showResult(tk, quiet) {
 }
 let rsz; addEventListener('resize', () => { clearTimeout(rsz); rsz = setTimeout(() => { if (!active) return; document.querySelectorAll('#ticketHost canvas.foil').forEach(cv => { if (!cv._done) paintFoil(cv, byId[active.id]); }); }, 250); });
 
-/* ================= Daily chest + slot ================= */
+/* ================= Daily draw (slot machine) ================= */
 let chestTimer = null;
 function openChest() { Sfx.init(); Sfx.click(); $('#chestModal').hidden = false; renderChest(); }
 function renderChest() {
   const ready = state.chestDay !== dayKey(), body = $('#chestBody');
   clearInterval(chestTimer);
   if (!ready) {
-    $('#chestSub').textContent = 'Next chest in';
-    body.innerHTML = `<div class="chest-stage used"><div class="rays"></div>${CHEST_SVG}</div><div class="countdown" id="cd">${hms(msToMidnight())}</div><div class="actions"><button class="btn btn-ghost" data-close>Close</button></div>`;
+    $('#chestSub').textContent = 'You’ve had today’s draw. The next one is in';
+    body.innerHTML = `<div class="countdown" id="cd">${hms(msToMidnight())}</div><div class="actions"><button class="btn btn-ghost" data-close>Close</button></div>`;
     chestTimer = setInterval(() => { const c = $('#cd'); if (c) c.textContent = hms(msToMidnight()); if (state.chestDay !== dayKey()) renderChest(); }, 1000);
     return;
   }
-  $('#chestSub').textContent = 'One free chest a day.';
-  body.innerHTML = `<div class="chest-stage ready" id="cstage"><div class="rays"></div>${CHEST_SVG}</div><div class="actions"><button class="btn btn-gold" id="openChestBtn">Open</button></div>`;
-  const go = () => {
-    const st = $('#cstage'); if (!st || st.classList.contains('open') || st.classList.contains('shake')) return;
-    Sfx.whoosh(); st.classList.remove('ready'); st.classList.add('shake');
-    setTimeout(() => { st.classList.remove('shake'); st.classList.add('open'); Sfx.lit(); const r = st.getBoundingClientRect(); Burst.confetti(r.left + r.width / 2, r.top + r.height / 2, 50, ['#FFE7A6', '#F2C14E', '#FFFFFF']); }, 600);
-    setTimeout(renderSlot, 1500);
-  };
-  $('#openChestBtn').onclick = go; body.querySelector('.chest-svg').addEventListener('click', go);
+  renderSlot();
 }
 function renderSlot() {
-  $('#chestSub').textContent = '';
+  $('#chestSub').textContent = 'One free pull a day. Win 3 to 100 chips.';
   const strip = [...Array(7)].map(() => [...Array(10).keys()].map(d => `<div>${d}</div>`).join('')).join('');
   $('#chestBody').innerHTML = `
     <div class="slot">

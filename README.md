@@ -7,7 +7,7 @@ Play chips only. No cash value.
 ## Features
 
 - **30 themed tickets** across six price tiers, each with its own game
-- **Daily chest:** a slot machine that pays 3 to 100 chips once a day
+- **Daily draw:** one free pull of a slot machine each day, paying 3 to 100 chips
 - **Daily top-up:** anyone under 50 chips at the start of a new day goes back up to 50
 - **Accounts:** sign up with email, password and a username. Progress follows you to any device.
 - **Leaderboard:** rank by chips, biggest win or total won
@@ -20,7 +20,7 @@ Play chips only. No cash value.
 - **Voice chat:** click **Join voice** in a room to talk with everyone else in voice. It connects browsers directly to each other, for up to 8 people.
 - **Background music:** a relaxed lounge loop made live in the browser. Toggle it with the music-note button. It gets quieter while you're in voice chat.
 
-The server decides every ticket prize and chest amount, so players can't give themselves chips by editing the page.
+The server decides every ticket prize and daily draw amount, so players can't give themselves chips by editing the page.
 
 ## Files
 
