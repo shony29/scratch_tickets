@@ -14,7 +14,8 @@ Play chips only. No cash value.
 - **Friends:** add friends by username, see who's online, send each other chips
 - **Activity:** friends' big wins pop up live, plus a feed of wins and gifts
 - **Live rooms:** open a room and invite friends or share the 5-letter code. You stay in the room until you leave, playing round after round. The host picks each game from inside the room. Everyone pays the entry into the pot, everyone scratches, and the highest ticket takes the pot. If nobody wins anything, everyone gets their chips back.
-- **Tournaments:** 7 random tickets from a price level the host picks (Low 2–3, Mid 5–10, High 15–20). Everyone plays the same 7, and the highest total takes the pot. The host can shuffle the lineup before starting.
+- **Tournaments:** 7 random tickets from a price level the host picks. Entry is fixed per level, whatever 7 tickets are drawn: Low 20 chips (2–3 chip tickets), Mid 50 (5–10 chip tickets), High 120 (15–20 chip tickets). Everyone plays the same 7, and the highest total takes the pot. The host can shuffle the lineup before starting.
+- **Public rooms:** make a room public and anyone can find it in the room list or use **Quick join**. Hosts can remove people (they can't rejoin that room), and anyone can block a player to hide their messages and mute their voice.
 - **Room chat:** every room has its own chat. New messages pop up even while you're scratching.
 - **Voice chat:** click **Join voice** in a room to talk with everyone else in voice. It connects browsers directly to each other, for up to 8 people.
 - **Background music:** a relaxed lounge loop made live in the browser. Toggle it with the music-note button. It gets quieter while you're in voice chat.
@@ -57,7 +58,11 @@ Until this is done, the game runs in solo mode and saves in the browser.
 
 1. Go to **Authentication → Sign In / Providers → Email**.
 2. Turn **off** "Confirm email", then save. Players can then start right after signing up. Supabase's free email sending only allows a few emails an hour, so confirmation emails would get stuck.
-3. Go to **Authentication → URL Configuration** and set **Site URL** to your game's address, for example `https://scratch-tickets.vercel.app`. This makes password-reset links come back to your game.
+3. Go to **Authentication → URL Configuration**:
+   - Set **Site URL** to your game's address, for example `https://foil-lounge.vercel.app`, and save.
+   - Under **Redirect URLs**, click **Add URL**, enter `https://foil-lounge.vercel.app/**`, and save.
+   Without these, password-reset links send people to `localhost`, which doesn't work.
+4. Emails: Supabase's built-in email only sends to people on your Supabase team and only a few per hour. For password resets to reach every player, set up your own email sending under **Project Settings → Authentication → SMTP Settings** (a free service such as Resend or Brevo works).
 
 ### 4. Connect the game
 

@@ -106,6 +106,8 @@ alter table public.rooms add column if not exists round int  not null default 0;
 alter table public.rooms add column if not exists themes text[];
 alter table public.rooms add column if not exists entry int  not null default 0;
 alter table public.rooms add column if not exists pot   int  not null default 0;
+alter table public.rooms add column if not exists is_public boolean not null default false;
+alter table public.rooms add column if not exists banned uuid[] not null default '{}';
 alter table public.room_players add column if not exists totals   int[];
 alter table public.room_players add column if not exists progress int not null default 0;
 alter table public.room_players add column if not exists in_round boolean not null default false;
@@ -432,7 +434,9 @@ declare r record; v_themes text[]; v_entry int;
 begin
   select * into r from rooms where id = p_room;
   if r.mode = 'tourney' then
-    select array_agg(id), sum(price) into v_themes, v_entry from (
+    -- Tournament entry is fixed per level, whatever 7 games are drawn.
+    v_entry := case r.tier when 'high' then 120 when 'mid' then 50 else 20 end;
+    select array_agg(id) into v_themes from (
       select id, price from themes
       where price = any(case r.tier when 'high' then array[15, 20] when 'mid' then array[5, 10] else array[2, 3] end)
       order by random() limit 7) x;
@@ -449,7 +453,7 @@ begin
   select * into r from rooms where id = p_room;
   if r.id is null or not exists (select 1 from room_players where room_id = p_room and user_id = v_uid) then return null; end if;
   return jsonb_build_object(
-    'id', r.id, 'code', r.code, 'host', r.host, 'status', r.status, 'mode', r.mode, 'tier', r.tier, 'theme', r.theme,
+    'id', r.id, 'code', r.code, 'host', r.host, 'status', r.status, 'mode', r.mode, 'tier', r.tier, 'theme', r.theme, 'is_public', r.is_public,
     'round', r.round, 'themes', to_jsonb(r.themes), 'entry', r.entry, 'pot', r.pot, 'result', r.result,
     'version', r.version, 'started_at', r.started_at,
     'players', (select jsonb_agg(jsonb_build_object(
@@ -514,7 +518,8 @@ begin
 end $$;
 
 -- Remove one player. Leaving mid-round forfeits that round's entry.
-create or replace function public._leave(p_uid uuid, p_room uuid) returns void
+drop function if exists public._leave(uuid, uuid);
+create or replace function public._leave(p_uid uuid, p_room uuid, p_quiet boolean default false) returns void
 language plpgsql security definer set search_path = public as $$
 declare r record; v_name text; v_next uuid;
 begin
@@ -527,7 +532,7 @@ begin
     update rooms set status = 'closed', version = version + 1 where id = p_room;
     return;
   end if;
-  perform public._sys(p_room, v_name || ' left the room.');
+  if not p_quiet then perform public._sys(p_room, v_name || ' left the room.'); end if;
   if r.host = p_uid then
     update rooms set host = v_next where id = p_room;
     perform public._sys(p_room, (select username from room_players where room_id = p_room and user_id = v_next) || ' is the host now.');
@@ -554,7 +559,8 @@ language sql stable security definer set search_path = public as $$
                  where rp.user_id = p_uid and r.status = 'playing' and rp.in_round and not rp.finished);
 $$;
 
-create or replace function public.create_room(p_theme text, p_day date) returns jsonb
+drop function if exists public.create_room(text, date);
+create or replace function public.create_room(p_theme text, p_day date, p_public boolean default false) returns jsonb
 language plpgsql security definer set search_path = public as $$
 declare v_uid uuid := public._uid(); v_code text; v_id uuid; v_name text;
 begin
@@ -567,10 +573,11 @@ begin
     v_code := (select string_agg(substr('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', 1 + floor(random() * 32)::int, 1), '') from generate_series(1, 5));
     exit when not exists (select 1 from rooms where code = v_code);
   end loop;
-  insert into rooms (code, host, theme, price, status, mode, tier) values (v_code, v_uid, p_theme, 0, 'lobby', 'single', 'low') returning id into v_id;
+  insert into rooms (code, host, theme, price, status, mode, tier, is_public)
+    values (v_code, v_uid, p_theme, 0, 'lobby', 'single', 'low', coalesce(p_public, false)) returning id into v_id;
   insert into room_players (room_id, user_id, username) values (v_id, v_uid, v_name);
   perform public._room_lineup(v_id);
-  perform public._sys(v_id, v_name || ' opened the room.');
+  perform public._sys(v_id, v_name || ' opened ' || case when p_public then 'a public' else 'the' end || ' room.');
   return public.room_state(v_id);
 end $$;
 
@@ -581,6 +588,7 @@ begin
   select * into r from rooms where code = upper(trim(p_code)) and status in ('lobby', 'playing');
   if r.id is null then raise exception 'no_such_room'; end if;
   if exists (select 1 from room_players where room_id = r.id and user_id = v_uid) then return public.room_state(r.id); end if;
+  if v_uid = any(r.banned) then raise exception 'banned'; end if;
   if (select count(*) from room_players where room_id = r.id) >= 8 then raise exception 'room_full'; end if;
   if public._busy(v_uid) then raise exception 'in_a_game'; end if;
   perform public._leave_all(v_uid);
@@ -685,6 +693,63 @@ begin
   return true;
 end $$;
 
+-- ---------- Public rooms ----------
+create or replace function public.set_room_public(p_room uuid, p_public boolean) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare v_uid uuid := public._uid(); r record;
+begin
+  select * into r from rooms where id = p_room;
+  if r.id is null or r.host <> v_uid then raise exception 'not_host'; end if;
+  if r.is_public is distinct from p_public then
+    update rooms set is_public = coalesce(p_public, false), version = version + 1 where id = p_room;
+    perform public._sys(p_room, 'The room is now ' || case when p_public then 'public. Anyone can join from the room list.' else 'private. Only people with the code can join.' end);
+  end if;
+  return public.room_state(p_room);
+end $$;
+
+create or replace function public.public_rooms() returns jsonb
+language sql stable security definer set search_path = public as $$
+  select coalesce(jsonb_agg(x order by x.lobby desc, x.players desc, x.created_at desc), '[]'::jsonb) from (
+    select r.code, r.status, r.mode, r.tier, r.theme, r.entry, r.round, r.created_at, r.status = 'lobby' as lobby,
+           (select username from profiles where id = r.host) as host,
+           (select count(*) from room_players where room_id = r.id) as players,
+           exists (select 1 from room_players where room_id = r.id and user_id = public._uid()) as mine
+    from rooms r
+    where r.is_public and r.status in ('lobby', 'playing') and not (public._uid() = any(r.banned))
+      and (select count(*) from room_players where room_id = r.id) between 1 and 7
+    order by r.created_at desc limit 40) x;
+$$;
+
+create or replace function public.quick_join() returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare v_uid uuid := public._uid(); v_code text;
+begin
+  select r.code into v_code from rooms r
+  where r.is_public and r.status in ('lobby', 'playing') and not (v_uid = any(r.banned))
+    and not exists (select 1 from room_players where room_id = r.id and user_id = v_uid)
+    and (select count(*) from room_players where room_id = r.id) between 1 and 7
+  order by (r.status = 'lobby') desc, (select count(*) from room_players where room_id = r.id) desc, r.created_at desc
+  limit 1;
+  if v_code is null then raise exception 'no_public_rooms'; end if;
+  return public.join_room(v_code);
+end $$;
+
+-- Host removes someone. They can't come back to this room.
+create or replace function public.kick_player(p_room uuid, p_user uuid) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare v_uid uuid := public._uid(); r record; v_name text;
+begin
+  select * into r from rooms where id = p_room;
+  if r.id is null or r.host <> v_uid then raise exception 'not_host'; end if;
+  if p_user = v_uid then raise exception 'thats_you'; end if;
+  select username into v_name from room_players where room_id = p_room and user_id = p_user;
+  if v_name is null then return public.room_state(p_room); end if;
+  update rooms set banned = array_append(banned, p_user) where id = p_room;
+  perform public._sys(p_room, v_name || ' was removed by the host.');
+  perform public._leave(p_user, p_room, true);
+  return public.room_state(p_room);
+end $$;
+
 -- ---------- Room chat ----------
 create or replace function public.send_message(p_room uuid, p_body text) returns jsonb
 language plpgsql security definer set search_path = public as $$
@@ -710,6 +775,11 @@ begin
     where room_id = p_room and id > coalesce(p_after, 0) order by id desc limit 80) m), '[]'::jsonb);
 end $$;
 
+-- Tournaments waiting to start use the fixed entry for their level too.
+update public.rooms set entry = case tier when 'high' then 120 when 'mid' then 50 else 20 end,
+                        price = case tier when 'high' then 120 when 'mid' then 50 else 20 end
+  where mode = 'tourney' and status = 'lobby';
+
 -- ---------- Who can call what ----------
 revoke execute on all functions in schema public from public, anon;
 grant execute on function public.username_available(text) to anon, authenticated;
@@ -717,13 +787,14 @@ grant execute on function
   public.me(date), public.buy_ticket(text, date), public.claim_ticket(bigint), public.open_chest(date),
   public.leaderboard(text), public.social_state(), public.request_friend(text), public.respond_friend(uuid, boolean),
   public.remove_friend(uuid), public.send_chips(uuid, int), public.feed(),
-  public.room_state(uuid), public.my_room(), public.create_room(text, date), public.join_room(text),
+  public.room_state(uuid), public.my_room(), public.create_room(text, date, boolean), public.join_room(text),
+  public.set_room_public(uuid, boolean), public.public_rooms(), public.quick_join(), public.kick_player(uuid, uuid),
   public.leave_room(uuid), public.invite_to_room(uuid, uuid), public.set_room_game(uuid, text, text, text),
   public.start_round(uuid, date), public.finish_room_ticket(uuid, int, int), public.settle_room(uuid),
   public.send_message(uuid, text), public.room_messages(uuid, bigint), public.is_room_member(uuid)
 to authenticated;
 revoke execute on function public._daily(uuid, date), public._me(uuid), public._make_friends(uuid, uuid),
-  public._leave(uuid, uuid), public._leave_all(uuid), public._busy(uuid), public._settle_room(uuid),
+  public._leave(uuid, uuid, boolean), public._leave_all(uuid), public._busy(uuid), public._settle_room(uuid),
   public._room_lineup(uuid), public._sys(uuid, text) from authenticated;
 -- Old room function from the first version
 drop function if exists public.start_room(uuid);
