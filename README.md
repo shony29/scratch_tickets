@@ -13,7 +13,11 @@ Play chips only. No cash value.
 - **Leaderboard:** rank by chips, biggest win or total won
 - **Friends:** add friends by username, see who's online, send each other chips
 - **Activity:** friends' big wins pop up live, plus a feed of wins and gifts
-- **Live rooms:** create a room, invite friends or share the 5-letter code. Everyone pays the ticket price into the pot, everyone scratches, and the highest ticket takes the pot. If nobody wins anything, everyone gets their chips back.
+- **Live rooms:** open a room and invite friends or share the 5-letter code. You stay in the room until you leave, playing round after round. The host picks each game from inside the room. Everyone pays the entry into the pot, everyone scratches, and the highest ticket takes the pot. If nobody wins anything, everyone gets their chips back.
+- **Tournaments:** 7 random tickets from a price level the host picks (Low 2–3, Mid 5–10, High 15–20). Everyone plays the same 7, and the highest total takes the pot. The host can shuffle the lineup before starting.
+- **Room chat:** every room has its own chat. New messages pop up even while you're scratching.
+- **Voice chat:** click **Join voice** in a room to talk with everyone else in voice. It connects browsers directly to each other, for up to 8 people.
+- **Background music:** a relaxed lounge loop made live in the browser. Toggle it with the music-note button. It gets quieter while you're in voice chat.
 
 The server decides every ticket prize and chest amount, so players can't give themselves chips by editing the page.
 
@@ -84,5 +88,7 @@ The site is plain static files, with no build step.
 ## Notes
 
 - Updating the database later: paste the newest `supabase.sql` into the SQL Editor and run it again. It updates in place and keeps everyone's accounts and chips.
-- Rooms hold up to 8 players. If someone takes more than 2 minutes to finish, the others can close the game out. Scores are already decided when the game starts, so waiting doesn't change the result.
+- Rooms hold up to 8 players. If someone takes more than 2 minutes per game to finish, the others can close the round out. Scores are already decided when the round starts, so waiting doesn't change the result.
+- Joining a room partway through a round means sitting that round out and playing in the next one. Leaving partway through a round forfeits that round's entry.
+- Voice chat needs microphone permission. It works on most home and mobile networks. A small number of strict work or school networks block direct connections, and there voice won't connect, though chat still works.
 - Gifts go only to friends, and you can send up to 1,000 chips at a time.

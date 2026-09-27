@@ -536,12 +536,13 @@ function generate(th, forced) {
 
 /* ================= State & saving ================= */
 const KEY = 'foil-lounge-v1';
-const fresh = () => ({ v: 1, balance: 50, day: dayKey(), chestDay: null, sound: true, updatedAt: 0,
+const fresh = () => ({ v: 1, balance: 50, day: dayKey(), chestDay: null, sound: true, music: true, updatedAt: 0,
   stats: { played: 0, spent: 0, won: 0, wins: 0, best: 0, bestId: null, chests: 0, chestTotal: 0 },
   today: { day: dayKey(), spent: 0, won: 0 }, per: {}, history: [], current: null });
 function normalize(s) {
   const f = fresh(); if (!s || typeof s !== 'object') return f;
   const o = Object.assign(f, s); o.stats = Object.assign(fresh().stats, s.stats || {}); o.today = Object.assign(fresh().today, s.today || {});
+  if (typeof o.music !== 'boolean') o.music = true;
   o.per = s.per || {}; o.history = Array.isArray(s.history) ? s.history : [];
   if (o.current && (!byId[o.current.id] || !Array.isArray(o.current.revealed) || !Array.isArray(o.current.groups) || o.current.v !== 3)) { if (o.current.price && !o.current.done) o.balance += o.current.price; o.current = null; }
   return o;
@@ -642,6 +643,110 @@ const Sfx = {
   click() { this.tone(660, .05, { type: 'triangle', gain: .06 }); },
 };
 document.addEventListener('pointerdown', () => Sfx.init(), { once: false, passive: true });
+
+/* ================= Background music (made live in the browser, loops forever) ================= */
+const Music = (() => {
+  let ctx = null, out = null, timer = null, next = 0, step = 0, bar = 0, prog = 0, playing = false, ducked = false;
+  const BPM = 82, E = 60 / BPM / 2;            // one eighth note
+  const LEVEL = .16, DUCK = .06;
+  // Two 4-bar progressions (MIDI notes), alternated so the loop doesn't feel short.
+  const PROGS = [
+    [[53, 57, 60, 64], [52, 55, 59, 62], [50, 53, 57, 60], [48, 52, 55, 59]],   // Fmaj7 Em7 Dm7 Cmaj7
+    [[50, 53, 57, 60], [55, 59, 62, 65], [48, 52, 55, 59], [45, 48, 52, 55]],   // Dm7 G7 Cmaj7 Am7
+  ];
+  const hz = m => 440 * Math.pow(2, (m - 69) / 12);
+  function impulse(sec) {
+    const len = ctx.sampleRate * sec, b = ctx.createBuffer(2, len, ctx.sampleRate);
+    for (let c = 0; c < 2; c++) { const d = b.getChannelData(c); for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 3); }
+    return b;
+  }
+  function setup() {
+    Sfx.init(); ctx = Sfx.ctx; if (!ctx) return false;
+    if (out) return true;
+    out = ctx.createGain(); out.gain.value = 0;
+    const tone = ctx.createBiquadFilter(); tone.type = 'lowpass'; tone.frequency.value = 4200;
+    const rev = ctx.createConvolver(); rev.buffer = impulse(2.6);
+    const wet = ctx.createGain(); wet.gain.value = .32;
+    out.connect(tone).connect(ctx.destination);
+    out.connect(rev).connect(wet).connect(ctx.destination);
+    return true;
+  }
+  function note(f, t, dur, { type = 'sine', gain = .1, attack = .01, release = .3, cutoff = 0, detune = 0 } = {}) {
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = type; o.frequency.setValueAtTime(f, t); if (detune) o.detune.value = detune;
+    g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(gain, t + attack);
+    g.gain.setValueAtTime(gain, t + Math.max(attack, dur - release)); g.gain.linearRampToValueAtTime(0, t + dur);
+    let node = o.connect(g);
+    if (cutoff) { const f2 = ctx.createBiquadFilter(); f2.type = 'lowpass'; f2.frequency.value = cutoff; node = g.connect(f2); }
+    node.connect(out); o.start(t); o.stop(t + dur + .05);
+  }
+  function hat(t, gain) {
+    if (!Sfx.noiseBuf) return;
+    const s = ctx.createBufferSource(); s.buffer = Sfx.noiseBuf;
+    const f = ctx.createBiquadFilter(); f.type = 'highpass'; f.frequency.value = 7500;
+    const g = ctx.createGain(); g.gain.setValueAtTime(gain, t); g.gain.exponentialRampToValueAtTime(.0001, t + .05);
+    s.connect(f).connect(g).connect(out); s.start(t, Math.random() * .3); s.stop(t + .07);
+  }
+  function kick(t) {
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.frequency.setValueAtTime(95, t); o.frequency.exponentialRampToValueAtTime(42, t + .18);
+    g.gain.setValueAtTime(.32, t); g.gain.exponentialRampToValueAtTime(.0001, t + .3);
+    o.connect(g).connect(out); o.start(t); o.stop(t + .32);
+  }
+  function play(i, t) {
+    const chord = PROGS[prog][bar], sw = i % 2 ? E * .18 : 0, at = t + sw;
+    if (i === 0) {
+      chord.forEach(m => { note(hz(m), t, E * 8 + .4, { type: 'triangle', gain: .028, attack: .5, release: 1.1, cutoff: 1300, detune: -7 }); note(hz(m), t, E * 8 + .4, { type: 'triangle', gain: .028, attack: .5, release: 1.1, cutoff: 1300, detune: 7 }); });
+    }
+    if (i === 0 || i === 5) note(hz(chord[0] - 12), at, E * (i === 0 ? 3.5 : 2.5), { type: 'sine', gain: .2, attack: .02, release: .25 });
+    if (i === 0 || i === 4) kick(t);
+    if (i % 2 === 1) hat(at, .03); else if (Math.random() < .35) hat(at, .015);
+    // Mellow keys melody: chord tones an octave up, with rests so it breathes.
+    const pattern = bar % 2 ? [0, 2, 1, 3, 2, 1, 3, 2] : [2, 1, 3, 2, 1, 0, 2, 3];
+    if (Math.random() < (i % 2 ? .45 : .7)) {
+      const m = chord[pattern[i]] + 12 + (Math.random() < .12 ? 12 : 0);
+      note(hz(m), at, E * 1.6, { type: 'sine', gain: .05, attack: .005, release: .45 });
+      note(hz(m) * 2, at, E * .8, { type: 'triangle', gain: .008, attack: .005, release: .3 });
+    }
+  }
+  function schedule() {
+    while (next < ctx.currentTime + .25) {
+      play(step, next);
+      next += E; step++;
+      if (step === 8) { step = 0; bar++; if (bar === 4) { bar = 0; prog = (prog + 1) % PROGS.length; } }
+    }
+  }
+  function level() { return ducked ? DUCK : LEVEL; }
+  function start() {
+    if (playing || !state.music || document.hidden || !setup()) return;
+    if (ctx.state === 'suspended') ctx.resume();
+    playing = true; next = ctx.currentTime + .1; step = 0;
+    out.gain.cancelScheduledValues(ctx.currentTime);
+    out.gain.setValueAtTime(out.gain.value, ctx.currentTime); out.gain.linearRampToValueAtTime(level(), ctx.currentTime + 2.5);
+    timer = setInterval(schedule, 60); schedule();
+  }
+  function stop(fast) {
+    if (!playing) return; playing = false; clearInterval(timer); timer = null;
+    if (out) { out.gain.cancelScheduledValues(ctx.currentTime); out.gain.setValueAtTime(out.gain.value, ctx.currentTime); out.gain.linearRampToValueAtTime(0, ctx.currentTime + (fast ? .3 : 1.2)); }
+  }
+  function duck(on) {
+    ducked = on;
+    if (playing && out) { out.gain.cancelScheduledValues(ctx.currentTime); out.gain.setValueAtTime(out.gain.value, ctx.currentTime); out.gain.linearRampToValueAtTime(level(), ctx.currentTime + .8); }
+  }
+  function paint() {
+    const b = $('#musicBtn'); if (!b) return;
+    b.setAttribute('aria-pressed', String(!!state.music));
+    $('#musicOff').hidden = !!state.music;
+  }
+  function toggle() {
+    state.music = !state.music; save(); paint();
+    if (state.music) { start(); toast('Music on'); } else { stop(); toast('Music off'); }
+  }
+  document.addEventListener('visibilitychange', () => { if (document.hidden) stop(true); else start(); });
+  document.addEventListener('pointerdown', () => start(), { passive: true });
+  document.addEventListener('keydown', () => start());
+  return { start, stop, toggle, duck, paint, playing: () => playing };
+})();
 
 /* ================= Burst particles (global overlay) ================= */
 const Burst = (() => {
@@ -982,7 +1087,7 @@ function renderResume() {
   const rt = ONLINE && uid ? Room.ticket() : null;
   if (rt && !rt.done) {
     res.hidden = false;
-    res.innerHTML = `<span class="dotlive"></span><span><b>Room game</b> in play</span><button id="resumeBtn">Resume</button>`;
+    res.innerHTML = `<span class="dotlive"></span><span><b>${byId[rt.id].name}</b> · room game</span><button id="resumeBtn">Resume</button>`;
     $('#resumeBtn').onclick = () => openPlay(rt); return;
   }
   if (cur && !cur.done) {
@@ -1525,6 +1630,8 @@ document.addEventListener('keydown', e => {
   if (e.key === 'ArrowRight') step(1); else if (e.key === 'ArrowLeft') step(-1);
 });
 function updateSoundIcon() { $('#soundWaves').style.display = state.sound ? '' : 'none'; $('#soundOff').hidden = state.sound; $('#soundBtn').setAttribute('aria-pressed', String(state.sound)); }
+$('#musicBtn').addEventListener('click', () => { Sfx.init(); Sfx.click(); Music.toggle(); });
+Music.paint();
 $('#soundBtn').addEventListener('click', () => { state.sound = !state.sound; save(); updateSoundIcon(); Sfx.init(); Sfx.click(); toast(state.sound ? 'Sound on' : 'Sound off'); });
 
 setInterval(() => {
@@ -1617,7 +1724,7 @@ const Auth = (() => {
   }
   async function signedIn(user) {
     uid = user.id;
-    if (state.uid !== uid) Object.assign(state, { uid, current: null, roomTk: null, history: [], per: {}, pendingClaim: null });
+    if (state.uid !== uid) Object.assign(state, { uid, current: null, roomRun: null, history: [], per: {}, pendingClaim: null });
     state.adult = true;
     let p;
     try { p = await rpc('me', { p_day: dayKey() }); }
@@ -1734,7 +1841,7 @@ const Social = (() => {
     body().innerHTML = f.length ? f.map(ev => {
       const d = ev.data || {}; let icon = '🎉', txt = '';
       if (ev.kind === 'big_win') txt = `${who(ev, d.username)} won <b>${fmt(d.amount)}</b> on ${esc(themeName(d.theme))}`;
-      else if (ev.kind === 'room_win') { icon = '🏆'; txt = `${who(ev, d.username)} took a <b>${fmt(d.amount)}</b>-chip pot in a ${d.players}-player room`; }
+      else if (ev.kind === 'room_win') { icon = '🏆'; txt = `${who(ev, d.username)} ${d.mode === 'tourney' ? 'won a tournament and ' : ''}took a <b>${fmt(d.amount)}</b>-chip pot in a ${d.players}-player room`; }
       else if (ev.kind === 'gift') { icon = '🎁'; txt = ev.mine ? `You sent <b>${fmt(d.amount)}</b> chips to ${esc(d.to || 'a friend')}` : `${who(ev, d.username)} sent you <b>${fmt(d.amount)}</b> chips`; }
       return `<div class="lrow feed"><span class="av em">${icon}</span><div class="nm">${txt}<small>${ago(Date.parse(ev.created_at))}</small></div></div>`;
     }).join('') : '<div class="empty">Nothing here yet. Big wins from you and your friends, room wins and gifts all show up here.</div>';
@@ -1745,7 +1852,7 @@ const Social = (() => {
       if (e.kind === 'gift') { Sfx.win(false); toast(`🎁 ${d.username} sent you ${fmt(d.amount)} chips`); pulseBal('bump'); refreshMe(900); }
       else if (e.kind === 'friend_request') { if (me) me.requests = (me.requests || 0) + 1; badge(); toastAct(`${d.username} wants to be friends`, 'View', () => open('friends')); if (isOpen() && tab === 'friends' && !typing()) renderFriends(); }
       else if (e.kind === 'friend_accept') { toast(`${d.username} is now your friend`); data = null; if (isOpen() && tab === 'friends' && !typing()) renderFriends(); }
-      else if (e.kind === 'room_invite') toastAct(`${d.username} invited you to ${themeName(d.theme)} · ${d.price} chips to join`, 'Join', () => Room.join(d.code), 20000);
+      else if (e.kind === 'room_invite') toastAct(`${d.username} invited you to room ${d.code}`, 'Join', () => Room.join(d.code), 20000);
     } else if (!e.target && e.user_id !== uid) {
       if (Room.has(e.user_id)) return; // you'll see it in your own room
       if (e.kind === 'big_win') toast(`🎉 ${d.username} just won ${fmt(d.amount)} on ${themeName(d.theme)}`);
@@ -1807,24 +1914,163 @@ const Social = (() => {
   return { open, badge, connect, disconnect, isOnline, rerender: () => { if (isOpen() && tab === 'rooms' && !typing()) render(); }, tab: () => tab, isOpen };
 })();
 
-/* ================= Live rooms ================= */
-const Room = (() => {
-  let s = null, tk = null, ch = null, poll = null, busy = false, lastKey = '', invited = new Set();
-  const mine = () => s && s.players.find(p => p.id === uid);
-  function clear(silent) {
-    if (ch) { sb.removeChannel(ch); ch = null; }
-    clearInterval(poll); poll = null; s = null; tk = null; lastKey = ''; invited.clear();
-    state.roomTk = null; save();
-    if (!silent) { Social.rerender(); if (!active) renderResume(); }
+/* ================= Voice chat (peer to peer, signalled through the room channel) ================= */
+const Voice = (() => {
+  const ICE = { iceServers: [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }] };
+  let on = false, muted = false, micOk = false, stream = null, chan = null, actx = null, meter = null;
+  const peers = new Map(), levels = {};
+  const send = msg => { if (chan) chan.send({ type: 'broadcast', event: 'rtc', payload: Object.assign({ from: uid }, msg) }); };
+  function analyse(id, st) {
+    try {
+      if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+      if (actx.state === 'suspended') actx.resume();
+      const src = actx.createMediaStreamSource(st), an = actx.createAnalyser(); an.fftSize = 512; src.connect(an);
+      levels[id] = { an, buf: new Uint8Array(an.fftSize) };
+    } catch (e) {}
   }
-  function watch(id) {
+  function startMeter() {
+    clearInterval(meter);
+    meter = setInterval(() => {
+      const speaking = new Set();
+      for (const id in levels) {
+        const { an, buf } = levels[id]; an.getByteTimeDomainData(buf);
+        let sum = 0; for (let i = 0; i < buf.length; i++) { const v = (buf[i] - 128) / 128; sum += v * v; }
+        if (Math.sqrt(sum / buf.length) > 0.04 && !(id === uid && muted)) speaking.add(id);
+      }
+      Room.speaking(speaking);
+    }, 180);
+  }
+  function peer(id) {
+    let p = peers.get(id); if (p) return p;
+    const pc = new RTCPeerConnection(ICE);
+    p = { id, pc, polite: String(uid) < String(id), making: false, ignore: false, audio: null };
+    peers.set(id, p);
+    if (stream && stream.getAudioTracks().length) stream.getTracks().forEach(t => pc.addTrack(t, stream));
+    else pc.addTransceiver('audio', { direction: 'recvonly' });
+    pc.onnegotiationneeded = async () => {
+      try { p.making = true; await pc.setLocalDescription(); send({ to: id, type: 'desc', desc: pc.localDescription }); }
+      catch (e) {} finally { p.making = false; }
+    };
+    pc.onicecandidate = ({ candidate }) => { if (candidate) send({ to: id, type: 'cand', cand: candidate }); };
+    pc.ontrack = ({ track, streams }) => {
+      const st = streams[0] || new MediaStream([track]);
+      if (!p.audio) { p.audio = document.createElement('audio'); p.audio.autoplay = true; p.audio.setAttribute('playsinline', ''); p.audio.className = 'vaudio'; document.body.appendChild(p.audio); }
+      p.audio.srcObject = st; p.audio.play().catch(() => toastAct('Tap to hear voice chat', 'Listen', () => document.querySelectorAll('audio.vaudio').forEach(a => a.play().catch(() => {}))));
+      analyse(id, st);
+    };
+    pc.onconnectionstatechange = () => { if (pc.connectionState === 'failed' || pc.connectionState === 'closed') drop(id); Room.paintVoice(); };
+    return p;
+  }
+  function drop(id) {
+    const p = peers.get(id); if (!p) return;
+    peers.delete(id); delete levels[id];
+    try { p.pc.close(); } catch (e) {}
+    if (p.audio) { p.audio.srcObject = null; p.audio.remove(); }
+  }
+  async function signal(m) {
+    if (!on || !m || m.from === uid || (m.to && m.to !== uid)) return;
+    if (m.type === 'hello') { peer(m.from); return; }
+    if (m.type === 'bye') { drop(m.from); return; }
+    const p = peer(m.from), pc = p.pc;
+    try {
+      if (m.type === 'desc') {
+        const d = m.desc, collision = d.type === 'offer' && (p.making || pc.signalingState !== 'stable');
+        p.ignore = !p.polite && collision; if (p.ignore) return;
+        await pc.setRemoteDescription(d);
+        if (d.type === 'offer') { await pc.setLocalDescription(); send({ to: m.from, type: 'desc', desc: pc.localDescription }); }
+      } else if (m.type === 'cand') {
+        try { await pc.addIceCandidate(m.cand); } catch (e) { if (!p.ignore) throw e; }
+      }
+    } catch (e) { console.warn('voice', e); }
+  }
+  async function join() {
+    if (on) return true;
+    if (!window.RTCPeerConnection) { toast('Voice chat isn’t supported in this browser'); return false; }
+    micOk = false;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+      micOk = true;
+    } catch (e) {
+      stream = null;
+      toast('No microphone access, so you can listen but not talk. Allow the mic in your browser to talk.');
+    }
+    on = true; muted = !micOk; Music.duck(true);
+    if (stream) analyse(uid, stream);
+    startMeter();
+    send({ type: 'hello' });
+    Sfx.lit();
+    return true;
+  }
+  function leave(silent) {
+    if (!on) return;
+    send({ type: 'bye' });
+    [...peers.keys()].forEach(drop);
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    stream = null; on = false; muted = false; micOk = false; Music.duck(false);
+    for (const k in levels) delete levels[k];
+    clearInterval(meter); meter = null; Room.speaking(new Set());
+    if (!silent) Sfx.click();
+  }
+  function toggleMute() {
+    if (!on) return;
+    if (!micOk) { toast('Allow the microphone in your browser to talk'); return; }
+    muted = !muted; stream.getAudioTracks().forEach(t => { t.enabled = !muted; });
+    Sfx.click();
+  }
+  // Someone left voice without saying goodbye (closed the tab): tidy up.
+  function prune(present) { [...peers.keys()].forEach(id => { if (!present.has(id)) drop(id); }); }
+  return {
+    attach: c => { chan = c; }, signal, join, leave, toggleMute, prune,
+    on: () => on, muted: () => muted, connected: id => { const p = peers.get(id); return !!(p && p.pc.connectionState === 'connected'); },
+  };
+})();
+
+/* ================= Live rooms ================= */
+const ROOM_TIERS = { low: 'Low · 2–3', mid: 'Mid · 5–10', high: 'High · 15–20' };
+const ICON = {
+  mic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>',
+  micOff: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 9.3V6a3 3 0 0 0-5.7-1.3M9 9v2a3 3 0 0 0 5 2.2M5 11a7 7 0 0 0 11.5 5.3M19 11a7 7 0 0 1-.4 2.3M12 18v3M4 4l16 16"/></svg>',
+  chat: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12.5a7.5 7.5 0 0 1-11 6.6L4 20l1-4.3A7.5 7.5 0 1 1 20 12.5z"/></svg>',
+  send: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12l16-8-6 16-2.5-6.5z"/></svg>',
+};
+const Room = (() => {
+  let s = null, run = null, ch = null, poll = null, busy = false, lastKey = '', invited = new Set();
+  let msgs = [], lastMsg = 0, unread = 0, present = {}, picker = false, invOpen = false, loadingMsgs = false, speakingNow = new Set();
+  const mine = () => s && s.players.find(p => p.id === uid);
+  const isHost = () => !!(s && s.host === uid);
+  const modalOpen = () => !$('#roomModal').hidden;
+  const nGames = () => (s && s.themes ? s.themes.length : 1);
+  const label = () => (s && s.mode === 'tourney' ? 'Tournament' : 'Round');
+
+  /* ---------- connection ---------- */
+  function connect(id) {
     if (ch && ch.roomId === id) return;
-    if (ch) sb.removeChannel(ch);
-    ch = sb.channel('room-' + id)
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'rooms', filter: 'id=eq.' + id }, () => refresh())
-      .subscribe();
+    if (ch) { Voice.leave(true); sb.removeChannel(ch); }
+    ch = sb.channel('room:' + id, { config: { broadcast: { self: false }, presence: { key: uid } } });
+    ch.on('broadcast', { event: 'poke' }, () => { refresh(); loadMsgs(); });
+    ch.on('broadcast', { event: 'rtc' }, ({ payload }) => Voice.signal(payload));
+    ch.on('presence', { event: 'sync' }, () => {
+      const st = ch.presenceState(); present = {};
+      for (const k in st) present[k] = (st[k] && st[k][0]) || {};
+      Voice.prune(new Set(Object.keys(present).filter(k => present[k].voice)));
+      paintPlayers(); dock();
+    });
+    ch.subscribe(st => { if (st === 'SUBSCRIBED') track(); });
     ch.roomId = id;
+    Voice.attach(ch);
     clearInterval(poll); poll = setInterval(tick, 4000);
+  }
+  function track() { if (ch) { try { ch.track({ name: me && me.username, voice: Voice.on(), muted: Voice.muted() }); } catch (e) {} } }
+  function poke() { if (ch) { try { ch.send({ type: 'broadcast', event: 'poke', payload: {} }); } catch (e) {} } }
+  function clear(silent) {
+    Voice.leave(true);
+    if (ch) { sb.removeChannel(ch); ch = null; }
+    clearInterval(poll); poll = null;
+    s = null; run = null; lastKey = ''; invited.clear(); msgs = []; lastMsg = 0; unread = 0; present = {}; picker = false; invOpen = false;
+    state.roomRun = null; save();
+    $('#roomModal').hidden = true; $('#roomBody').dataset.room = '';
+    dock();
+    if (!silent) { Social.rerender(); if (!active) renderResume(); }
   }
   async function refresh() {
     if (!s) return; const id = s.id;
@@ -1837,66 +2083,89 @@ const Room = (() => {
   }
   function tick() {
     if (!s) return;
-    refresh();
-    // After 2 minutes anyone in the room can close it out, so one slow player can't hold everyone up.
-    if (s.status === 'playing' && tk && tk.done && s.started_at && Date.now() - Date.parse(s.started_at) > 125000)
-      rpc('settle_room', { p_room: s.id }).then(ns => ns && set(ns)).catch(() => {});
+    refresh(); loadMsgs();
+    const my = mine();
+    if (s.status === 'playing' && my && my.in_round && run && run.tks.every(t => t.done) && s.started_at
+        && Date.now() - Date.parse(s.started_at) > 120000 * nGames() + 5000)
+      rpc('settle_room', { p_room: s.id }).then(ns => { if (ns) { set(ns); poke(); } }).catch(() => {});
   }
   function set(ns) {
     if (!ns) return;
-    const prev = s; s = ns;
-    if (ns.status === 'cancelled') { const host = ns.host === uid; clear(); refreshMe(600); if (!host) toast('The host closed the room. Your chips are back.'); return; }
-    if (ns.status === 'open' || ns.status === 'playing') watch(ns.id);
-    if (ns.status === 'playing') ensureTicket();
-    const key = ns.id + ':' + ns.version + ':' + ns.status;
-    if (ns.status === 'done') {
-      if (ch) { sb.removeChannel(ch); ch = null; } clearInterval(poll); poll = null;
-      if (!prev || prev.id !== ns.id || prev.status !== 'done') done();
+    s = ns;
+    if (ns.status === 'closed') { clear(); toast('The room closed'); return; }
+    connect(ns.id);
+    if (run && run.room === ns.id && ns.result && ns.result.round >= run.round) {
+      const r = run; run = null; state.roomRun = null; save(); roundDone(r, ns.result);
     }
-    if (key !== lastKey) { lastKey = key; Social.rerender(); strip(); if (!active) renderResume(); }
+    if (ns.status === 'playing') ensureRun();
+    const key = ns.id + ':' + ns.version + ':' + ns.status + ':' + ns.host;
+    if (key !== lastKey) { lastKey = key; paint(); strip(); dock(); Social.rerender(); if (!active) renderResume(); }
   }
-  function ensureTicket() {
-    const my = mine(); if (!my || my.total == null) return;
-    if (tk && tk.room === s.id) return;
-    const saved = state.roomTk && state.roomTk.room === s.id ? state.roomTk : null;
-    tk = saved || Object.assign(generate(byId[s.theme], my.total), { room: s.id });
-    if (!saved && my.finished) { tk.done = true; tk.revealed = tk.revealed.map(() => true); }
-    state.roomTk = tk; save();
-    if (tk.done) { if (!my.finished) Room.finished(tk); return; }
+
+  /* ---------- playing a round ---------- */
+  const nextTk = () => (run ? run.tks.find(t => !t.done) : null);
+  function ensureRun() {
+    const my = mine(); if (!my || !my.in_round || !Array.isArray(my.totals) || !my.totals.length) return;
+    if (run && run.room === s.id && run.round === s.round) return;
+    const saved = state.roomRun && state.roomRun.room === s.id && state.roomRun.round === s.round ? state.roomRun : null;
+    if (saved) run = saved;
+    else {
+      run = { room: s.id, round: s.round, tks: s.themes.map((id, i) => Object.assign(generate(byId[id], my.totals[i]), { room: s.id, round: s.round, idx: i })) };
+      run.tks.forEach((t, i) => { if (i < my.progress) { t.done = true; t.revealed = t.revealed.map(() => true); } });
+    }
+    state.roomRun = run; save();
+    // Catch up if a ticket was finished here but the server never heard about it.
+    const doneHere = run.tks.filter(t => t.done).length;
+    if (doneHere > my.progress) report(run.tks[doneHere - 1]);
+    if (my.finished) return;
+    const tk = nextTk(); if (!tk) return;
     const go = () => { document.querySelectorAll('.modal').forEach(m => { m.hidden = true; }); openPlay(tk); };
-    if (active && !$('#play').hidden && active !== tk) toastAct('Your room game has started', 'Play', go, 30000);
-    else { if (!saved) { toast('Game on. Highest ticket takes the pot.'); Sfx.whoosh(); } go(); }
+    if (active && active.room === s.id && active.round === s.round) return;
+    const onOldRoomTicket = active && active.room === s.id && active.done;
+    if (onOldRoomTicket) { toast(s.mode === 'tourney' ? '7-game tournament. Highest total takes the pot.' : 'Next round. Highest ticket takes the pot.'); Sfx.whoosh(); go(); }
+    else if (active && !$('#play').hidden) toastAct(`${label()} ${s.round} has started`, 'Play', go, 30000);
+    else if (!saved) { toast(s.mode === 'tourney' ? '7-game tournament. Highest total takes the pot.' : 'Game on. Highest ticket takes the pot.'); Sfx.whoosh(); go(); }
   }
-  async function finished(t) {
+  async function report(t) {
     if (!s || t.room !== s.id) return;
-    try { set(await rpc('finish_room_ticket', { p_room: s.id })); }
-    catch (e) { setTimeout(() => finished(t), 3000); }
+    try { set(await rpc('finish_room_ticket', { p_room: t.room, p_round: t.round, p_index: t.idx })); poke(); }
+    catch (e) { setTimeout(() => report(t), 3000); }
   }
-  function done() {
-    const m = mine(), refund = s.result && s.result.refund;
-    state.roomTk = null; save();
-    if (refund) { toast('Nobody won anything, so everyone gets their chips back.'); refreshMe(900); }
-    else if (m && m.payout > 0) {
+  function finished(t) { save(); report(t); }
+  function roundDone(r, res) {
+    const st = (res.standings || []).find(p => p.id === uid);
+    if (!st) return;
+    if (res.refund) { toast('Nobody won anything, so everyone gets their chips back.'); refreshMe(900); }
+    else if (st.payout > 0) {
       Sfx.win(true);
       const b = document.createElement('div'); b.className = 'bigwin';
-      b.innerHTML = `<div><div class="l1">Pot won</div><div class="l2">+${fmt(m.payout)} CHIPS</div></div>`;
+      b.innerHTML = `<div><div class="l1">${res.mode === 'tourney' ? 'Champion' : 'Pot won'}</div><div class="l2">+${fmt(st.payout)} CHIPS</div></div>`;
       document.body.appendChild(b); setTimeout(() => b.remove(), 2900);
       Burst.confetti(innerWidth / 2, innerHeight * .45, 140, ['#F2C14E', '#FFFFFF', '#6BE3A0', '#FFE7A6']);
       setTimeout(() => flyChips(innerWidth / 2, innerHeight * .5, 14, () => { refreshMe(900); pulseBal('bump'); }), 600);
     } else {
-      const w = s.players.filter(p => p.payout > 0).map(p => p.username);
+      const w = res.standings.filter(p => p.payout > 0).map(p => p.username);
       toast(`${w.join(' & ') || 'Someone'} took the pot`); refreshMe(600);
     }
-    if ($('#play').hidden && !Social.isOpen()) setTimeout(() => Social.open('rooms'), 700);
+    if (active && active.room === r.room) pillStatus();
+    if ($('#play').hidden) setTimeout(open, 700);
   }
   function showResult(t, quiet) {
     const th = byId[t.id], won = t.total;
     $('#pill').className = 'pill glasspill' + (won ? ' win' : '');
     setRing(1, won ? `${won / th.price}×` : '—');
     pillStatus();
-    $('#pa').innerHTML = `<button class="btn btn-ghost" id="toLobby">Lobby</button><button class="btn btn-light" id="roomRes">Room</button>`;
-    $('#toLobby').onclick = () => { Sfx.click(); closePlay(); };
-    $('#roomRes').onclick = () => Social.open('rooms');
+    const nx = run && run.round === t.round ? nextTk() : null;
+    $('#pa').innerHTML = nx
+      ? `<button class="btn btn-ghost" id="roomRes">Room</button><button class="btn btn-gold" id="nextTk">Next game · ${nx.idx + 1}/${run.tks.length}</button>`
+      : `<button class="btn btn-ghost" id="toLobby">Lobby</button><button class="btn btn-light" id="roomRes">Room</button>`;
+    if ($('#toLobby')) $('#toLobby').onclick = () => { Sfx.click(); closePlay(); };
+    $('#roomRes').onclick = () => open();
+    if (nx) $('#nextTk').onclick = () => {
+      Sfx.click(); const tEl = $('#ticket');
+      const go = () => openPlay(nx);
+      if (tEl && !reduced) { const a = tEl.animate([{ transform: 'none', opacity: 1 }, { transform: 'translateX(-120%) rotate(-8deg)', opacity: 0 }], { duration: 420, easing: 'cubic-bezier(.5,0,.8,.4)', fill: 'forwards' }); a.onfinish = go; } else go();
+    };
     if (quiet) return;
     if (won) {
       Sfx.win(false); $('#ticket').classList.add('celebrate');
@@ -1904,62 +2173,149 @@ const Room = (() => {
       Burst.confetti(r.left + r.width / 2, Math.min(innerHeight * .6, r.top + r.height / 2), 60, [th.acc, th.c[1], '#FFFFFF', '#F2C14E']);
     } else Sfx.lose();
   }
+  function myScore(round) {
+    const r = run && run.round === round ? run : state.roomRun && state.roomRun.round === round ? state.roomRun : null;
+    return r ? r.tks.filter(t => t.done).reduce((a, t) => a + t.total, 0) : 0;
+  }
   function pillStatus() {
     if (!active || !active.room || !active.done) return;
     let sub = '';
-    if (s && s.id === active.room) {
-      if (s.status === 'done') {
-        const m = mine();
-        if (s.result && s.result.refund) sub = 'Nobody won. Chips refunded.';
-        else if (m && m.payout) sub = `You took the pot · +${fmt(m.payout)}`;
-        else sub = `${s.players.filter(p => p.payout > 0).map(p => p.username).join(' & ')} took the pot`;
-      } else { const left = s.players.filter(p => !p.finished).length; sub = left ? `Waiting for ${left} more player${left > 1 ? 's' : ''}…` : 'Adding up…'; }
-    } else if (!s) sub = 'Room finished';
+    const res = s && s.result && s.result.round === active.round ? s.result : null;
+    if (res) {
+      const st = (res.standings || []).find(p => p.id === uid);
+      if (res.refund) sub = 'Nobody won. Chips refunded.';
+      else if (st && st.payout) sub = `You took the pot · +${fmt(st.payout)}`;
+      else sub = `${(res.standings || []).filter(p => p.payout > 0).map(p => p.username).join(' & ')} took the pot`;
+    } else if (s && s.id === active.room && s.round === active.round) {
+      const nx = nextTk(), n = s.themes.length;
+      if (nx) sub = `Game ${active.idx + 1} of ${n} · your total ${fmt(myScore(active.round))}`;
+      else { const left = s.players.filter(p => p.in_round && !p.finished && p.id !== uid).length; sub = left ? `Waiting for ${left} more player${left > 1 ? 's' : ''}…` : 'Adding up…'; }
+    } else sub = 'Round finished';
     $('#ps').innerHTML = `<div class="t">${active.total ? `${chipSvg()}${fmt(active.total)}` : 'No win'}</div><div class="s">${esc(sub)}</div>`;
   }
   function strip() {
     if (!active || !active.room || !s || active.room !== s.id) return;
-    $('#ptMeta').innerHTML = `<div class="rstrip"><span class="rpot">${chipSvg('gold')}${fmt(s.pot)} pot</span>${s.players.map(p => `<span class="rpl${p.finished ? ' done' : ''}${p.id === uid ? ' me' : ''}">${esc(p.username)}${p.finished ? ` · ${fmt(p.total || 0)}` : ''}</span>`).join('')}</div>`;
+    const n = s.themes ? s.themes.length : 1;
+    const players = s.players.filter(p => p.in_round);
+    $('#ptMeta').innerHTML = `<div class="rstrip"><span class="rpot">${chipSvg('gold')}${fmt(s.pot)} pot</span>${n > 1 ? `<span class="rgame">Game ${active.idx + 1}/${n}</span>` : ''}${players.map(p => {
+      const sc = p.id === uid ? myScore(active.round) : p.score;
+      const pr = p.id === uid ? (run ? run.tks.filter(t => t.done).length : n) : p.progress;
+      return `<span class="rpl${pr >= n ? ' done' : ''}${p.id === uid ? ' me' : ''}">${esc(p.username)}${pr ? ` · ${fmt(sc)}` : ''}</span>`;
+    }).join('')}</div>`;
     pillStatus();
   }
-  function render(el) {
-    if (!s) {
-      const t = byId[sel];
-      el.innerHTML = `
-        <div class="rhero" style="${themeVars(t)}">
-          <div class="rh-emb">${emblemHTML(t)}</div>
-          <div class="rh-txt"><small>New room</small><b>${esc(t.name)}</b><span>Everyone pays ${t.price} chips. The highest ticket takes the pot.</span></div>
+
+  /* ---------- room screen ---------- */
+  function open() {
+    if (!s) return;
+    Sfx.init(); Sfx.click();
+    document.querySelectorAll('.modal').forEach(m => { if (m.id !== 'roomModal') m.hidden = true; });
+    $('#roomModal').hidden = false; unread = 0;
+    build(); paint(); renderChat(true); loadMsgs(); dock();
+  }
+  function build() {
+    const b = $('#roomBody'); if (b.dataset.room === s.id) return;
+    b.dataset.room = s.id;
+    b.innerHTML = `
+      <header class="rm-head" id="rmHead"></header>
+      <div class="rm-grid">
+        <div class="rm-main"><div id="rmStage"></div><h4 class="sh">In the room <span id="rmCount"></span></h4><div id="rmPlayers"></div><div id="rmInvite"></div></div>
+        <section class="rm-chat" aria-label="Room chat">
+          <h4 class="sh">${ICON.chat}Chat</h4>
+          <div class="chatlist" id="chatList"></div>
+          <form class="chatform" id="chatForm" autocomplete="off"><input id="chatIn" maxlength="300" placeholder="Message the room" enterkeyhint="send"><button class="sendbtn" type="submit" aria-label="Send">${ICON.send}</button></form>
+        </section>
+      </div>`;
+    $('#chatForm').onsubmit = sendMsg;
+  }
+  function paint() {
+    if (!s || !modalOpen()) return;
+    build(); paintHead(); paintStage(); paintPlayers(); paintInvite();
+  }
+  function paintHead() {
+    const st = s.status === 'playing' ? `${label()} ${s.round} in play` : isHost() ? 'You’re the host' : 'Waiting for the host';
+    $('#rmHead').innerHTML = `
+      <div class="rm-title"><small>${esc(st)}</small><b>Room <button class="rm-code" data-r="copy" aria-label="Copy room code">${esc(s.code)}</button></b></div>
+      <div class="rm-tools">${voiceBtns()}<button class="btn btn-ghost sm" data-r="leave">Leave</button></div>`;
+  }
+  function voiceBtns() {
+    if (!Voice.on()) return `<button class="vbtn" data-r="voice">${ICON.mic}<span>Join voice</span></button>`;
+    return `<button class="vbtn on${Voice.muted() ? ' muted' : ''}" data-r="mute" aria-pressed="${Voice.muted()}">${Voice.muted() ? ICON.micOff : ICON.mic}<span>${Voice.muted() ? 'Unmute' : 'Mute'}</span></button><button class="vbtn off" data-r="voiceoff"><span>Leave voice</span></button>`;
+  }
+  function paintVoice() { if (modalOpen() && s) { const h = $('#rmHead .rm-tools'); if (h) h.innerHTML = `${voiceBtns()}<button class="btn btn-ghost sm" data-r="leave">Leave</button>`; paintPlayers(); } dock(); }
+  function lineupHTML(themes) {
+    return `<div class="lineup">${themes.map((id, i) => { const t = byId[id]; return t ? `<div class="lu" style="${themeVars(t)}"><span class="lu-n">${i + 1}</span><span class="lu-e">${emblemHTML(t)}</span><b>${esc(t.name)}</b><small>${t.price}</small></div>` : ''; }).join('')}</div>`;
+  }
+  function pickerHTML() {
+    const prices = [...new Set(THEMES.map(t => t.price))].sort((a, b) => a - b);
+    return `<div class="picker">${prices.map(p => `<div class="pk-row"><span class="pk-p">${chipSvg()}${p}</span><div class="pk-list">${THEMES.filter(t => t.price === p).map(t => `<button class="pk${t.id === s.theme ? ' on' : ''}" data-theme="${t.id}" style="${themeVars(t)}"><span class="pk-e">${emblemHTML(t)}</span>${esc(t.name)}</button>`).join('')}</div></div>`).join('')}</div>`;
+  }
+  function resultHTML(res) {
+    if (!res || !res.standings || !res.standings.length) return '';
+    const n = res.themes ? res.themes.length : 1;
+    return `<div class="rm-result"><h4 class="sh">${res.mode === 'tourney' ? 'Last tournament' : 'Last round'} · pot ${fmt(res.pot)}</h4>
+      ${res.standings.map((p, i) => `<div class="lrow lb${p.id === uid ? ' mine' : ''}${p.payout && !res.refund ? ' top1' : ''}"><span class="rk">${i + 1}</span><div class="nm">${esc(p.username)}<small>${p.payout && !res.refund ? `Took the pot · +${fmt(p.payout)}` : res.refund ? 'Refunded' : n > 1 ? `${(p.totals || []).filter(v => v > 0).length} of ${n} games won` : 'No luck'}</small></div><span class="val">${fmt(p.score)}</span></div>`).join('')}</div>`;
+  }
+  function paintStage() {
+    const host = isHost(), my = mine(), n = nGames();
+    let h = '';
+    if (s.status === 'lobby') {
+      const t = byId[s.theme] || THEMES[0];
+      h += `<div class="rm-card">
+        <div class="seg small${host ? '' : ' ro'}"><button data-mode="single" aria-pressed="${s.mode === 'single'}" ${host ? '' : 'disabled'}>Single game</button><button data-mode="tourney" aria-pressed="${s.mode === 'tourney'}" ${host ? '' : 'disabled'}>Tournament · 7 games</button></div>`;
+      if (s.mode === 'single') {
+        h += `<div class="rhero" style="${themeVars(t)}"><div class="rh-emb">${emblemHTML(t)}</div><div class="rh-txt"><small>Next game</small><b>${esc(t.name)}</b><span>Everyone pays ${s.entry}. The highest ticket takes the pot.</span></div>${host ? `<button class="btn btn-light sm" data-r="pick">${picker ? 'Done' : 'Change'}</button>` : ''}</div>
+          ${host && picker ? pickerHTML() : ''}`;
+      } else {
+        h += `<div class="seg small tiers${host ? '' : ' ro'}">${Object.keys(ROOM_TIERS).map(k => `<button data-tier="${k}" aria-pressed="${s.tier === k}" ${host ? '' : 'disabled'}>${ROOM_TIERS[k]}</button>`).join('')}</div>
+          ${lineupHTML(s.themes || [])}
+          <p class="rm-note">Everyone plays these 7 tickets. The highest total across all 7 takes the pot.</p>`;
+      }
+      const short = state.balance < s.entry;
+      h += `<div class="rm-go">
+          <div class="rm-entry"><small>Entry</small><b>${chipSvg()}${fmt(s.entry)}</b></div>
+          ${host ? `${s.mode === 'tourney' ? '<button class="btn btn-ghost" data-r="shuffle">Shuffle</button>' : ''}<button class="btn btn-gold" data-r="start" ${s.players.length < 2 ? 'disabled' : ''}>${s.players.length < 2 ? 'Waiting for players' : s.mode === 'tourney' ? 'Start tournament' : 'Start round'}</button>`
+                 : '<span class="rm-wait">The host starts each round</span>'}
         </div>
-        <button class="btn btn-gold wide" data-r="create" ${state.balance < t.price ? 'disabled' : ''}>Create room · ${chipSvg()}${t.price}</button>
-        <p class="hint">To use a different ticket, pick it in the lobby first.</p>
-        <div class="or"><span>or join a friend</span></div>
-        <form class="addrow" id="joinForm"><input id="joinCode" placeholder="Room code" maxlength="5" autocomplete="off" autocapitalize="characters" spellcheck="false"><button class="btn btn-light" type="submit">Join</button></form>`;
-      $('#joinForm').onsubmit = e => { e.preventDefault(); const c = $('#joinCode').value.trim(); if (c) join(c); };
-      return;
-    }
-    const t = byId[s.theme], host = s.host === uid, refund = s.result && s.result.refund;
-    const status = s.status === 'open' ? (host ? 'Invite friends, then start' : 'Waiting for the host') : s.status === 'playing' ? 'Game on' : 'Results';
-    let players;
-    if (s.status === 'done') {
-      players = [...s.players].sort((a, b) => (b.total || 0) - (a.total || 0)).map((p, i) => `<div class="lrow lb${p.id === uid ? ' mine' : ''}${p.payout && !refund ? ' top1' : ''}"><span class="rk">${i + 1}</span><div class="nm">${esc(p.username)}<small>${p.payout && !refund ? `Takes the pot · +${fmt(p.payout)}` : refund ? 'Refunded' : `Scored ${fmt(p.total || 0)}`}</small></div><span class="val">${fmt(p.total || 0)}</span></div>`).join('');
+        ${short ? `<p class="rm-note warn">You need ${s.entry} chips to play. You’ll sit out until you have enough.</p>` : ''}
+        ${s.players.length < 2 ? '<p class="rm-note">Share the room code or invite a friend below. You need at least 2 players.</p>' : ''}
+      </div>`;
+      h += resultHTML(s.result);
     } else {
-      players = s.players.map(p => `<div class="lrow${p.id === uid ? ' mine' : ''}"><span class="av">${esc(p.username[0].toUpperCase())}<i class="on${p.id === uid || Social.isOnline(p.id) ? ' yes' : ''}"></i></span><div class="nm">${esc(p.username)}${p.id === s.host ? '<small>Host</small>' : ''}</div><span class="val st">${s.status === 'open' ? 'In' : p.finished ? fmt(p.total || 0) : 'Scratching…'}</span></div>`).join('');
+      const inR = s.players.filter(p => p.in_round).sort((a, b) => b.score - a.score);
+      const left = run ? run.tks.filter(t => !t.done).length : 0;
+      h += `<div class="rm-card live">
+        <div class="rm-live"><span class="dotlive"></span>${label()} ${s.round} · pot ${fmt(s.pot)}</div>
+        ${s.mode === 'tourney' ? lineupHTML(s.themes) : ''}
+        ${inR.map((p, i) => { const pr = p.id === uid ? (run ? n - left : n) : p.progress; const sc = p.id === uid ? myScore(s.round) : p.score;
+          return `<div class="lrow lb${p.id === uid ? ' mine' : ''}"><span class="rk">${i + 1}</span><div class="nm">${esc(p.username)}<small>${pr >= n ? 'Finished' : n > 1 ? `Game ${pr + 1} of ${n}` : 'Scratching…'}</small></div><span class="val">${fmt(sc)}</span></div>`; }).join('')}
+        <div class="actions">${my && my.in_round
+          ? (left ? `<button class="btn btn-gold" data-r="play">${n > 1 ? `Play game ${n - left + 1} of ${n}` : 'Play my ticket'}</button>` : '<button class="btn btn-ghost" disabled>Waiting for the others…</button>')
+          : '<p class="rm-note">You’re sitting this one out. You’ll be in the next round.</p>'}</div>
+      </div>`;
     }
-    el.innerHTML = `
-      <div class="rhead" style="${themeVars(t)}">
-        <div class="rh-txt"><small>${status}</small><b>${esc(t.name)}</b></div>
-        <button class="rcode" data-r="copy" aria-label="Copy room code ${esc(s.code)}"><small>Code</small>${esc(s.code)}</button>
-      </div>
-      <div class="rstats"><div><small>Pot</small><b>${fmt(s.pot)}</b></div><div><small>Players</small><b>${s.players.length}/8</b></div><div><small>Entry</small><b>${s.price}</b></div></div>
-      ${refund ? '<p class="hint">Nobody won anything, so everyone got their chips back.</p>' : ''}
-      <h4 class="sh">Players</h4>${players}
-      ${s.status === 'open' ? `<h4 class="sh">Invite friends</h4><div id="invList">${dots}</div>` : ''}
-      <div class="actions">${s.status === 'open'
-        ? `<button class="btn btn-ghost" data-r="leave">${host ? 'Close room' : 'Leave'}</button>${host ? `<button class="btn btn-gold" data-r="start" ${s.players.length < 2 ? 'disabled' : ''}>${s.players.length < 2 ? 'Need 2 players' : 'Start game'}</button>` : ''}`
-        : s.status === 'playing'
-          ? (tk && !tk.done ? '<button class="btn btn-gold" data-r="play">Back to my ticket</button>' : '<button class="btn btn-ghost" disabled>Waiting for the others…</button>')
-          : `<button class="btn btn-ghost" data-r="close">Done</button><button class="btn btn-gold" data-r="again">Play again · ${s.price}</button>`}</div>`;
-    if (s.status === 'open') invites();
+    $('#rmStage').innerHTML = h;
+  }
+  function paintPlayers() {
+    if (!s || !modalOpen() || !$('#rmPlayers')) return;
+    $('#rmCount').textContent = `${s.players.length}/8`;
+    $('#rmPlayers').innerHTML = s.players.map(p => {
+      const pr = present[p.id], online = p.id === uid || !!pr, inVoice = p.id === uid ? Voice.on() : !!(pr && pr.voice), muted = p.id === uid ? Voice.muted() : !!(pr && pr.muted);
+      const status = s.status === 'playing' ? (p.in_round ? 'Playing' : 'Sitting out') : online ? 'Here' : 'Away';
+      return `<div class="lrow prow${speakingNow.has(p.id) ? ' speaking' : ''}" data-pid="${p.id}"><span class="av">${esc(p.username[0].toUpperCase())}<i class="on${online ? ' yes' : ''}"></i></span>
+        <div class="nm">${esc(p.username)}<small>${p.id === uid ? 'You · ' : ''}${p.id === s.host ? 'Host · ' : ''}${status}</small></div>
+        <span class="vico${inVoice ? ' in' : ''}${muted ? ' muted' : ''}" title="${inVoice ? (muted ? 'In voice, muted' : 'In voice') : 'Not in voice'}">${inVoice ? (muted ? ICON.micOff : ICON.mic) : ''}</span></div>`;
+    }).join('');
+  }
+  function speaking(set) {
+    speakingNow = set;
+    document.querySelectorAll('#rmPlayers .prow').forEach(r => r.classList.toggle('speaking', set.has(r.dataset.pid)));
+    const d = $('#roomDock .dk-mic'); if (d) d.classList.toggle('speaking', set.has(uid));
+  }
+  function paintInvite() {
+    const el = $('#rmInvite'); if (!el) return;
+    el.innerHTML = `<button class="linkbtn inv-t" data-r="invite">${invOpen ? 'Hide friends' : 'Invite friends'}</button>${invOpen ? `<div id="invList">${dots}</div>` : ''}`;
+    if (invOpen) invites();
   }
   async function invites() {
     let d; try { d = await rpc('social_state'); } catch (e) { const b = $('#invList'); if (b) b.innerHTML = ''; return; }
@@ -1967,43 +2323,152 @@ const Room = (() => {
     const inRoom = new Set(s.players.map(p => p.id));
     const list = d.friends.filter(f => !inRoom.has(f.id)).sort((a, b) => Social.isOnline(b.id) - Social.isOnline(a.id));
     box.innerHTML = list.length ? list.map(f => `<div class="lrow"><span class="av">${esc(f.username[0].toUpperCase())}<i class="on${Social.isOnline(f.id) ? ' yes' : ''}"></i></span><div class="nm">${esc(f.username)}<small>${Social.isOnline(f.id) ? 'Online' : 'Offline'}</small></div><div class="ra"><button class="btn ${invited.has(f.id) ? 'btn-ghost' : 'btn-light'} sm" data-inv="${f.id}" ${invited.has(f.id) ? 'disabled' : ''}>${invited.has(f.id) ? 'Invited' : 'Invite'}</button></div></div>`).join('')
-      : `<div class="empty">${d.friends.length ? 'All your friends are already here.' : 'Add friends in the Friends tab, or share the room code.'}</div>`;
+      : `<div class="empty">${d.friends.length ? 'All your friends are already here.' : 'Add friends in the Lounge, or share the room code.'}</div>`;
   }
+
+  /* ---------- chat ---------- */
+  async function loadMsgs() {
+    if (!s || loadingMsgs) return; loadingMsgs = true; const id = s.id, first = lastMsg === 0;
+    try {
+      const rows = await rpc('room_messages', { p_room: id, p_after: lastMsg });
+      if (!s || s.id !== id || !rows.length) return;
+      add(rows, first);
+    } catch (e) {} finally { loadingMsgs = false; }
+  }
+  function add(rows, quiet) {
+    const fresh = rows.filter(m => m.id > lastMsg && !msgs.some(x => x.id === m.id));
+    if (!fresh.length) return;
+    msgs = msgs.concat(fresh).sort((a, b) => a.id - b.id).slice(-150);
+    lastMsg = Math.max(lastMsg, ...fresh.map(m => m.id));
+    if (!quiet) {
+      const others = fresh.filter(m => m.kind === 'chat' && m.user_id !== uid);
+      if (others.length && !modalOpen()) {
+        unread += others.length; const m = others[others.length - 1];
+        toastAct(`${m.username}: ${m.body.length > 70 ? m.body.slice(0, 70) + '…' : m.body}`, 'Reply', open, 5000);
+        Sfx.click();
+      }
+    }
+    renderChat(); dock();
+  }
+  function renderChat(force) {
+    const list = $('#chatList'); if (!list || !modalOpen()) return;
+    const atBottom = force || list.scrollHeight - list.scrollTop - list.clientHeight < 60;
+    let prev = null;
+    list.innerHTML = msgs.length ? msgs.map(m => {
+      if (m.kind === 'system') { prev = null; return `<div class="cmsg sys">${esc(m.body)}</div>`; }
+      const same = prev === m.user_id; prev = m.user_id;
+      return `<div class="cmsg${m.user_id === uid ? ' me' : ''}${same ? ' cont' : ''}">${same ? '' : `<b>${esc(m.username)}</b>`}<span>${esc(m.body)}</span></div>`;
+    }).join('') : '<div class="cmsg sys">Say hi to the room.</div>';
+    if (atBottom) list.scrollTop = list.scrollHeight;
+  }
+  async function sendMsg(e) {
+    e.preventDefault(); const inp = $('#chatIn'), body = inp.value.trim(); if (!body || !s) return;
+    inp.value = '';
+    try { const m = await rpc('send_message', { p_room: s.id, p_body: body }); add([m], true); renderChat(true); poke(); }
+    catch (x) { if (!inp.value) inp.value = body; toast(/slow_down/.test(x.message || '') ? 'Slow down a little' : errText(x)); }
+  }
+
+  /* ---------- floating room button ---------- */
+  function dock() {
+    const d = $('#roomDock');
+    if (!s || !uid) { d.hidden = true; return; }
+    d.hidden = false;
+    d.innerHTML = `<button class="dk-room" data-d="open" aria-label="Open room ${esc(s.code)}"><span class="dotlive"></span><span>Room</span><b>${esc(s.code)}</b>${unread ? `<i class="dk-badge">${unread > 9 ? '9+' : unread}</i>` : ''}</button>${Voice.on() ? `<button class="dk-mic${Voice.muted() ? ' muted' : ''}${speakingNow.has(uid) ? ' speaking' : ''}" data-d="mute" aria-label="${Voice.muted() ? 'Unmute' : 'Mute'}">${Voice.muted() ? ICON.micOff : ICON.mic}</button>` : ''}`;
+  }
+
+  /* ---------- actions ---------- */
   async function create(themeId) {
     if (busy) return; busy = true;
-    try { const ns = await rpc('create_room', { p_theme: themeId, p_day: dayKey() }); invited.clear(); Sfx.buy(); pulseBal('drop'); set(ns); refreshMe(450); }
+    try { const ns = await rpc('create_room', { p_theme: themeId, p_day: dayKey() }); invited.clear(); set(ns); loadMsgs(); open(); }
     catch (e) { toast(errText(e)); }
     finally { busy = false; }
   }
   async function join(code) {
     if (busy) return; busy = true;
-    try {
-      const ns = await rpc('join_room', { p_code: code }); Sfx.buy(); pulseBal('drop'); set(ns); refreshMe(450);
-      if (ns.status === 'open') { Social.open('rooms'); toast('You’re in. Waiting for the host to start.'); }
-    } catch (e) { toast(errText(e)); }
+    try { const ns = await rpc('join_room', { p_code: code }); msgs = []; lastMsg = 0; set(ns); poke(); loadMsgs(); open(); toast('You’re in the room'); }
+    catch (e) { toast(errText(e)); }
     finally { busy = false; }
   }
-  async function onClick(b) {
+  async function setGame(mode, theme, tier) {
+    try { set(await rpc('set_room_game', { p_room: s.id, p_mode: mode || s.mode, p_theme: theme || s.theme, p_tier: tier || s.tier })); poke(); }
+    catch (e) { toast(errText(e)); }
+  }
+  async function act(b) {
     const r = b.dataset.r, inv = b.dataset.inv;
     if (inv && s) { b.disabled = true; await rpc('invite_to_room', { p_room: s.id, p_friend: inv }); invited.add(inv); b.textContent = 'Invited'; b.className = 'btn btn-ghost sm'; Sfx.click(); return; }
-    if (!r) return;
+    if (b.dataset.theme) { Sfx.click(); picker = false; return setGame('single', b.dataset.theme); }
+    if (b.dataset.mode) { Sfx.click(); picker = false; return setGame(b.dataset.mode); }
+    if (b.dataset.tier) { Sfx.click(); return setGame('tourney', null, b.dataset.tier); }
+    if (!r || !s) return;
+    if (r === 'copy') { Sfx.click(); try { await navigator.clipboard.writeText(s.code); toast('Room code copied'); } catch (e) { toast(`Room code: ${s.code}`); } return; }
+    if (r === 'pick') { Sfx.click(); picker = !picker; paintStage(); return; }
+    if (r === 'shuffle') { Sfx.whoosh(); return setGame('tourney'); }
+    if (r === 'start') { b.disabled = true; Sfx.buy(); set(await rpc('start_round', { p_room: s.id, p_day: dayKey() })); poke(); refreshMe(450); pulseBal('drop'); return; }
+    if (r === 'play') { const tk = nextTk(); if (tk) { $('#roomModal').hidden = true; openPlay(tk); } return; }
+    if (r === 'invite') { Sfx.click(); invOpen = !invOpen; paintInvite(); return; }
+    if (r === 'voice') { if (await Voice.join()) { track(); paintVoice(); } return; }
+    if (r === 'mute') { Voice.toggleMute(); track(); paintVoice(); return; }
+    if (r === 'voiceoff') { Voice.leave(); track(); paintVoice(); return; }
+    if (r === 'leave') {
+      const mid = s.status === 'playing' && mine() && mine().in_round && nextTk();
+      if (!b.classList.contains('sure')) { b.classList.add('sure'); b.textContent = mid ? 'Forfeit entry?' : 'Sure?'; setTimeout(() => { if (b.isConnected) { b.classList.remove('sure'); b.textContent = 'Leave'; } }, 2800); return; }
+      b.disabled = true; const id = s.id;
+      const p = await rpc('leave_room', { p_room: id }); poke(); clear(); applyProfile(p, 600); toast('You left the room');
+      if (active && active.room === id) closePlay();
+      return;
+    }
+  }
+  async function onModalClick(e) {
+    const b = e.target.closest('button'); if (!b || b.disabled || b.hasAttribute('data-close')) return;
+    try { await act(b); } catch (x) { toast(errText(x)); b.disabled = false; paint(); }
+  }
+
+  /* ---------- Lounge tab ---------- */
+  function render(el) {
+    if (!s) {
+      const t = byId[sel];
+      el.innerHTML = `
+        <div class="rhero" style="${themeVars(t)}">
+          <div class="rh-emb">${emblemHTML(t)}</div>
+          <div class="rh-txt"><small>New room</small><b>Play with friends</b><span>Open a room, then play round after round together. Pick single games or a 7-game tournament, and chat as you go.</span></div>
+        </div>
+        <button class="btn btn-gold wide" data-r="create">Open a room</button>
+        <div class="or"><span>or join a friend</span></div>
+        <form class="addrow" id="joinForm"><input id="joinCode" placeholder="Room code" maxlength="5" autocomplete="off" autocapitalize="characters" spellcheck="false"><button class="btn btn-light" type="submit">Join</button></form>`;
+      $('#joinForm').onsubmit = e => { e.preventDefault(); const c = $('#joinCode').value.trim(); if (c) join(c); };
+      return;
+    }
+    el.innerHTML = `
+      <div class="rhead"><div class="rh-txt"><small>${s.status === 'playing' ? `${label()} ${s.round} in play` : 'You’re in a room'}</small><b>Room ${esc(s.code)}</b><span>${s.players.map(p => esc(p.username)).join(', ')}</span></div></div>
+      <button class="btn btn-gold wide" data-r="openroom">Go to room</button>
+      <p class="hint">You stay in the room between games. Leave it from inside the room.</p>`;
+  }
+  async function onClick(b) {
+    const r = b.dataset.r; if (!r) return;
     Sfx.click();
     if (r === 'create') return create(sel);
-    if (!s) return;
-    if (r === 'copy') { try { await navigator.clipboard.writeText(s.code); toast('Room code copied'); } catch (e) { toast(`Room code: ${s.code}`); } return; }
-    if (r === 'leave') { b.disabled = true; const p = await rpc('leave_room', { p_room: s.id }); clear(); applyProfile(p, 600); toast('Chips refunded'); return; }
-    if (r === 'start') { b.disabled = true; set(await rpc('start_room', { p_room: s.id })); return; }
-    if (r === 'play') { if (tk) { $('#socialModal').hidden = true; openPlay(tk); } return; }
-    if (r === 'close') { clear(); return; }
-    if (r === 'again') { const th = s.theme; clear(true); return create(th); }
+    if (r === 'openroom') return open();
   }
   async function resume() {
-    try { const ns = await rpc('my_room'); if (ns) set(ns); else if (state.roomTk) { state.roomTk = null; save(); } } catch (e) {}
+    try {
+      const ns = await rpc('my_room');
+      if (ns) { set(ns); loadMsgs(); } else if (state.roomRun) { state.roomRun = null; save(); }
+    } catch (e) {}
   }
+  function init() {
+    $('#roomModal').addEventListener('click', onModalClick);
+    $('#roomDock').addEventListener('click', e => {
+      const b = e.target.closest('button'); if (!b) return;
+      if (b.dataset.d === 'open') open();
+      else if (b.dataset.d === 'mute') { Voice.toggleMute(); track(); paintVoice(); }
+    });
+    addEventListener('pagehide', () => Voice.leave(true));
+  }
+  init();
   return {
-    render, onClick, join, resume, clear, finished, showResult, strip, set,
+    render, onClick, join, resume, clear, finished, showResult, strip, set, open, speaking, paintVoice, track,
     has: id => !!(s && s.players.some(p => p.id === id)),
-    ticket: () => (tk && s && s.status === 'playing' ? tk : null),
+    ticket: () => nextTk(),
   };
 })();
 
