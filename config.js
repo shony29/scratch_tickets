@@ -1,7 +1,6 @@
 // Foil Lounge — online settings
-// Paste your two values from Supabase → Project Settings → API (see README).
-// Leave them empty and the game runs in solo mode, saving in the browser.
+// Your Supabase Project URL and publishable (anon) key. The publishable key is safe to put in the page.
 window.FOIL_CONFIG = {
-  supabaseUrl: '',      // e.g. 'https://abcdxyz.supabase.co'
-  supabaseAnonKey: '',  // the long "anon" / "publishable" key. It is safe to put in the page.
+  supabaseUrl: 'https://wbdrxsktvvckhaemlcdu.supabase.co',
+  supabaseAnonKey: 'sb_publishable_i47cTO4IC5_I5Oe4GdCnLw__3lSwzte',
 };
